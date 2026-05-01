@@ -23,12 +23,12 @@
  * other special characters — the only delimiter is the line break.
  */
 export function parseFrontmatterBooks(text) {
-  const match = text.match(/^---\n([\s\S]*?)\n---/);
+  const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!match) return null;
-  const booksSection = match[1].match(/^books:\n((?:[ \t]+-[^\n]+\n?)+)/m);
+  const booksSection = match[1].match(/^books:\r?\n((?:[ \t]+-[^\r\n]+(?:\r?\n)?)+)/m);
   if (!booksSection) return null;
   return booksSection[1]
-    .split("\n")
+    .split(/\r?\n/)
     .filter((line) => /^\s+-/.test(line))
     .map((line) => line.replace(/^\s+-\s*/, "").trim());
 }
