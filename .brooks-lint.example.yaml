@@ -81,3 +81,18 @@ version: 1
 # History file: .brooks-lint-history.json is written after each run.
 # Add to .gitignore if you don't want to track scores in version control.
 # Keep it committed if you want team-visible trend data.
+
+# Optional external expert-context packet.
+# brooks-lint still owns severity, report structure, and findings; mempalace only
+# supplies compact principles, diagnostics, guards, and examples.
+#
+# mempalace:
+#   enabled: true
+#   packet: skills/_shared/mempalace-context.md
+#   lenses:
+#     - brooks
+#     - philosophy-of-software-design
+#   retrieval:
+#     max_principles: 8
+#     include_counterexamples: true
+#     include_tensions: true

@@ -23,3 +23,6 @@ Thumbs.db
 
 # Local planning docs (not part of the plugin)
 docs/superpowers/
+
+# Generated local MemPalace packet
+skills/_shared/mempalace-context.md

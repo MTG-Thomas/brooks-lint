@@ -19,7 +19,7 @@ sentinel="$cmd_dir/.brooks-lint-v${version}"
 
 if [ ! -f "$sentinel" ]; then
     mkdir -p "$cmd_dir"
-    cp "$plugin_dir"/commands/brooks-*.md "$cmd_dir/"
+    cp -f "$plugin_dir"/commands/brooks-*.md "$cmd_dir/"
     # Clean up old sentinel files and write current version
     rm -f "$cmd_dir"/.brooks-lint-v* "$cmd_dir"/.brooks-lint-installed
     touch "$sentinel"

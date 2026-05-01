@@ -8,7 +8,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import os from "node:os";
@@ -22,6 +22,7 @@ import {
   extractGuideStepLabels,
 } from "./frontmatter.mjs";
 import { extractRiskCodes, classify } from "./eval-utils.mjs";
+import { assembleSystemPrompt } from "./assemble-prompt.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -418,6 +419,52 @@ test("returns 'fail' when codes found but Iron Law terms absent", () => {
   const scenario = { expected_output: "R1 R2" };
   const aiText = "R1 R2 Health Score: 85/100";
   assert.equal(classify(scenario, aiText), "fail");
+});
+
+// ── assembleSystemPrompt mempalace context ────────────────────────────────
+
+console.log("\nassembleSystemPrompt mempalace context");
+
+test("omits mempalace context when project config does not enable it", () => {
+  withTempDir(dir => {
+    writeFileSync(path.join(dir, ".brooks-lint.yaml"), "version: 1\n");
+    const prompt = assembleSystemPrompt("review", path.join(__dirname, "..", "skills"), dir);
+    assert.equal(prompt.includes("Mempalace Protocol"), false);
+    assert.equal(prompt.includes("Mempalace Context Packet"), false);
+  });
+});
+
+test("includes mempalace context when project config enables it", () => {
+  withTempDir(dir => {
+    const packetPath = path.join(dir, "skills", "_shared", "mempalace-context.md");
+    mkdirSync(path.dirname(packetPath), { recursive: true });
+    writeFileSync(packetPath, "# Mempalace Context Packet\n\napsd.deep-modules\n");
+    writeFileSync(path.join(dir, ".brooks-lint.yaml"), [
+      "version: 1",
+      "mempalace:",
+      "  enabled: true",
+      "  packet: skills/_shared/mempalace-context.md",
+      "",
+    ].join("\n"));
+    const prompt = assembleSystemPrompt("review", path.join(__dirname, "..", "skills"), dir);
+    assert.equal(prompt.includes("Mempalace Protocol"), true);
+    assert.equal(prompt.includes("apsd.deep-modules"), true);
+  });
+});
+
+test("falls back cleanly when mempalace is enabled but packet is missing", () => {
+  withTempDir(dir => {
+    writeFileSync(path.join(dir, ".brooks-lint.yaml"), [
+      "version: 1",
+      "mempalace:",
+      "  enabled: true",
+      "  packet: missing/mempalace-context.md",
+      "",
+    ].join("\n"));
+    const prompt = assembleSystemPrompt("review", path.join(__dirname, "..", "skills"), dir);
+    assert.equal(prompt.includes("Mempalace Protocol"), true);
+    assert.equal(prompt.includes("No generated mempalace context packet was found"), true);
+  });
 });
 
 // ── Integration: validate-repo.mjs passes against current repo ─────────────

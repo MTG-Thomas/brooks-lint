@@ -66,7 +66,7 @@ function getGitDiff(projectRoot) {
 const client = new Anthropic();
 
 const { diff, scope } = getGitDiff(projectDir);
-const systemPrompt = assembleSystemPrompt(mode, skillsDir);
+const systemPrompt = assembleSystemPrompt(mode, skillsDir, projectDir);
 
 const userMessage = diff
   ? `Run brooks-lint ${mode} mode on the following diff.\n\nScope: ${scope}\n\n\`\`\`diff\n${diff}\n\`\`\``

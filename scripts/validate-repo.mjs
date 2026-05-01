@@ -210,7 +210,7 @@ function checkStepAlignment() {
 
     // SKILL.md Process section must exist and have at least one numbered item
     const skillText = readText(`skills/${mode}/SKILL.md`);
-    const processMatch = skillText.match(/## Process\n([\s\S]*?)(?=\n##|$)/);
+    const processMatch = skillText.match(/## Process\r?\n([\s\S]*?)(?=\r?\n##|$)/);
     check(
       processMatch !== null,
       `skills/${mode}/SKILL.md has no ## Process section`,
@@ -244,7 +244,7 @@ function checkSkillsContent() {
     // Guard: SKILL.md frontmatter description must reference the current book count.
     // Positive assertion — self-updates when sourceWord changes with the book inventory.
     // Extract frontmatter only to avoid false positives from body text ("all six decay risks").
-    const frontmatterMatch = skillMd.match(/^---\n([\s\S]*?)\n---/);
+    const frontmatterMatch = skillMd.match(/^---\r?\n([\s\S]*?)\r?\n---/);
     const frontmatter = frontmatterMatch ? frontmatterMatch[1] : "";
     check(
       frontmatter.includes(`${sourceWord} classic`),
@@ -300,11 +300,16 @@ function checkSecurity() {
 }
 
 function checkHookOutput() {
-  function runHook(env = {}) {
+  function runHook(env = {}, shellPrefix = "") {
     const tempHome = mkdtempSync(path.join(os.tmpdir(), "brooks-lint-hook-home-"));
-    const stdout = execFileSync("bash", ["hooks/session-start"], {
+    const hookEnv = { ...process.env, HOME: tempHome, ...env };
+    if (shellPrefix.includes("CLAUDE_PLUGIN_ROOT")) delete hookEnv.CURSOR_PLUGIN_ROOT;
+    const commandArgs = shellPrefix
+      ? ["-lc", `${shellPrefix} ./hooks/session-start`]
+      : ["hooks/session-start"];
+    const stdout = execFileSync("bash", commandArgs, {
       cwd: root,
-      env: { ...process.env, HOME: tempHome, ...env },
+      env: hookEnv,
       encoding: "utf8",
     });
     return JSON.parse(stdout);
@@ -313,7 +318,7 @@ function checkHookOutput() {
   const defaultOut = runHook();
   check(typeof defaultOut.additional_context === "string", "hooks/session-start default output must include additional_context");
 
-  const claudeOut = runHook({ CLAUDE_PLUGIN_ROOT: "1" });
+  const claudeOut = runHook({}, "CLAUDE_PLUGIN_ROOT=1");
   check(claudeOut.hookSpecificOutput?.hookEventName === "SessionStart", "hooks/session-start Claude output must include hookSpecificOutput.hookEventName");
   check(typeof claudeOut.hookSpecificOutput?.additionalContext === "string", "hooks/session-start Claude output must include hookSpecificOutput.additionalContext");
 }
