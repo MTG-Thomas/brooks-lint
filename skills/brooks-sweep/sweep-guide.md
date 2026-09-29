@@ -125,14 +125,18 @@ in `../_shared/test-decay-risks.md`.
 
 Follow the same sub-steps as Step 2 (classify → apply → verify → summarize),
 using T-prefix risk codes. For production files with no test coverage at all,
-record as T2 (Missing Tests). A test scaffold that adds a pure-function test is
+record as T5 (Coverage Illusion). A test scaffold that adds a pure-function test is
 **Safe**; adding tests that require new test infrastructure is **Residual**.
 
 ---
 
 ### Step 4 — brooks-debt pass (tech debt accumulation)
 
-Re-classify R-findings through a debt lens — same symptoms at accumulation scale: repeated duplication, layered workarounds, stale `TODO`/`FIXME` clusters, dead flags. See `../brooks-debt/debt-guide.md` for the rubric; otherwise apply a severity bump for pattern-level occurrences (isolated Suggestion → 4+ modules Warning).
+Re-classify R-findings through a debt lens — same symptoms at accumulation scale:
+repeated duplication, layered workarounds, stale `TODO`/`FIXME` clusters, dead
+flags. Score each with **Pain (1–3) × Spread (1–3)**; total 7–9 = Critical,
+4–6 = Warning, 1–3 = Suggestion. Apply a severity bump for pattern-level
+occurrences (isolated Suggestion → 4+ modules Warning).
 
 Follow the same sub-steps as Step 2. Debt findings often span multiple files
 and are more likely to land in Extended-Safe or Residual than Safe.
@@ -218,7 +222,7 @@ Output the final report. Use the standard Report Template from
 ```
 # Brooks-Lint — Full Sweep Report
 Mode: Full Sweep | Scope: <files or directory>
-Config: .brooks-lint.yaml applied (N risks disabled, M paths ignored)   # omit if no config
+Config: .brooks-lint.yaml applied (strictness: <preset>, N risks disabled, M paths ignored)   # omit if no config
 
 ## Dimension Summary
 | Dimension | Scanned | Safe Applied | Extended Applied | Reverted | Residual |

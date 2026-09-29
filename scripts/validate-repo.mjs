@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -10,15 +10,28 @@ import {
   countTestRisks,
   extractChangelogVersion,
   extractGuideStepLabels,
+  hasOpencodeSlashFlag,
   PRODUCTION_RISK_COUNT,
   TEST_RISK_COUNT,
 } from "./frontmatter.mjs";
+import { GUIDE_BY_MODE, VALID_MODES } from "./assemble-prompt.mjs";
+import { versionRefs } from "./version-refs.mjs";
+import { coverageVerdict, plural } from "./changelog-audit.mjs";
+import {
+  platformDocs,
+  setupGuides,
+  linkedSetupGuides,
+  parseInstallerPlatforms,
+  platformEnumeration,
+  namesPlatform,
+} from "./platforms.mjs";
+import { render as renderStarHistory, readStamps as readStarStamps } from "./gen-star-history.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
 
 function readText(relPath) {
-  return readFileSync(path.join(root, relPath), "utf8");
+  return readFileSync(path.join(root, relPath), "utf8").replace(/\r\n/g, "\n");
 }
 
 function readJson(relPath) {
@@ -43,11 +56,11 @@ const sourceCoverage = readText("skills/_shared/source-coverage.md");
 const books = parseFrontmatterBooks(sourceCoverage);
 const sourceCount = books?.length ?? 0;
 
-const _countWords = [
+const COUNT_WORDS = [
   "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
   "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
 ];
-const sourceWord = _countWords[sourceCount] ?? String(sourceCount);
+const sourceWord = COUNT_WORDS[sourceCount] ?? String(sourceCount);
 const sourceWordCap = sourceWord.charAt(0).toUpperCase() + sourceWord.slice(1);
 
 const evals = readJson("evals/evals.json");
@@ -93,12 +106,53 @@ function checkChangelog() {
   );
 }
 
+// Changelog COVERAGE, as distinct from checkChangelog()'s existence check.
+// The audit runs only while a release is in progress — derived as "this
+// version has no tag yet" — so it never nags during normal work. Only the
+// provable gap fails: a pull request merged in the range whose number the
+// section never cites. Everything else is judgment and belongs to the
+// maintainer walking `npm run changelog:audit`.
+//
+// The skip is announced rather than silent. Plain `npm version <v>` tags as it
+// commits, and a tag deleted on the remote can survive locally; either would
+// switch this check off, and an unannounced off-state reads exactly like a pass.
+function checkChangelogCoverage() {
+  const verdict = coverageVerdict({ version, cwd: root, changelog: readText("CHANGELOG.md") });
+  if (verdict.skipped !== null) {
+    console.log(`Changelog coverage: not audited — ${verdict.skipped}.`);
+    return;
+  }
+  // Every audited run is announced, not only the failing ones — the range is
+  // context for a failure and the only proof of life on a pass. The scope is
+  // spelled out because the gate proves each merged pull request's number
+  // appears somewhere in the section, never that an entry was written.
+  console.log(
+    `Changelog coverage: audited ${plural(verdict.commitCount, "commit")} in ${verdict.range} — ` +
+      `pull-request citations only; walk the rest with npm run changelog:audit.`,
+  );
+  for (const gap of verdict.errors) check(false, gap);
+}
+
+// Version strings embedded in text files (README badges, docs JSON-LD). The
+// list lives in version-refs.mjs so this check and bump-version.mjs can never
+// disagree about what carries a version.
+function checkVersionRefs() {
+  for (const { rel, pattern, expected, required } of versionRefs(root, version)) {
+    const found = readText(rel).match(pattern) ?? [];
+    if (required) {
+      check(found.length > 0, `${rel} is missing its version reference (expected "${expected}")`);
+    }
+    for (const hit of found) {
+      check(hit === expected, `${rel} has stale "${hit}", expected "${expected}" (run npm run bump)`);
+    }
+  }
+}
+
 // Canonical Claude Code install command — must appear in README.md.
 const CANONICAL_INSTALL_CMD = "/plugin marketplace add hyhmrright/brooks-lint";
 
 function checkReadmeIntegrity() {
   const readme = readText("README.md");
-  check(readme.includes(`version-${version}-blue.svg`), `README.md badge does not reference version ${version}`);
   check(readme.includes(CANONICAL_INSTALL_CMD), `README.md should contain canonical install command`);
   check(
     readme.includes(`grounded in ${sourceWord} classic engineering books`),
@@ -168,65 +222,65 @@ function checkSharedFramework() {
 
 // ── Step alignment ────────────────────────────────────────────────────────
 
-const SKILL_GUIDES = [
-  ["brooks-review", "pr-review-guide.md"],
-  ["brooks-audit", "architecture-guide.md"],
-  ["brooks-debt", "debt-guide.md"],
-  ["brooks-test", "test-guide.md"],
-  ["brooks-health", "health-guide.md"],
-  ["brooks-sweep", "sweep-guide.md"],
-];
+// Derived from the canonical mode registry so a new skill only has to be
+// declared once (in assemble-prompt.mjs) to be validated here.
+const SKILL_GUIDES = Object.values(GUIDE_BY_MODE);
+
+/** Steps in one guide must be present, unique, and numerically contiguous. */
+function checkGuideSteps(rel) {
+  const text = readText(rel);
+  const labels = extractGuideStepLabels(text);
+
+  // A step at the wrong heading level is invisible to the label extractor, so the
+  // continuity check below silently skips it — that is how `## Step 7` in the PR
+  // guide stayed unvalidated while SKILL.md cited it by number. Catch the level
+  // itself, not just the sequence.
+  for (const heading of text.match(/^#{1,6} Step \d[a-z]?\b.*$/gm) ?? []) {
+    check(
+      heading.startsWith("### "),
+      `${rel} has a step heading at the wrong level (must be ###): "${heading.trim()}"`,
+    );
+  }
+
+  check(labels.length > 0, `${rel} has no ### Step headings — expected at least one`);
+
+  check(
+    new Set(labels).size === labels.length,
+    `${rel} has duplicate step labels: ${labels.filter((l, i) => labels.indexOf(l) !== i).join(", ")}`,
+  );
+
+  // Compare main step numbers only, ignoring sub-step suffixes: "6a" → 6, "0" → 0.
+  const mainSteps = [...new Set(labels.map(l => parseInt(l, 10)))].sort((a, b) => a - b);
+  const expectedStart = mainSteps[0]; // 0-indexed (architecture) or 1-indexed (others)
+  for (let i = 0; i < mainSteps.length; i++) {
+    check(
+      mainSteps[i] === expectedStart + i,
+      `${rel} main step sequence has a gap: expected ${expectedStart + i}, found ${mainSteps[i]}`,
+    );
+  }
+}
 
 function checkStepAlignment() {
-  const modeGuides = SKILL_GUIDES;
-
-  for (const [mode, guide] of modeGuides) {
-    const guideText = readText(`skills/${mode}/${guide}`);
-    const guideLabels = extractGuideStepLabels(guideText);
-
-    // Guard: guide must have at least 1 step
-    check(
-      guideLabels.length > 0,
-      `skills/${mode}/${guide} has no ### Step headings — expected at least one`,
-    );
-
-    // Check for duplicate step labels within the guide
-    const uniqueLabels = new Set(guideLabels);
-    check(
-      uniqueLabels.size === guideLabels.length,
-      `skills/${mode}/${guide} has duplicate step labels: ${guideLabels.filter((l, i) => guideLabels.indexOf(l) !== i).join(", ")}`,
-    );
-
-    // Verify main step numbers are sequential (ignoring sub-step suffixes).
-    // Extract the numeric base of each label: "6a" → 6, "2b" → 2, "0" → 0
-    const mainSteps = [...new Set(guideLabels.map(l => parseInt(l, 10)))].sort((a, b) => a - b);
-    const expectedStart = mainSteps[0]; // 0-indexed (architecture) or 1-indexed (others)
-    for (let i = 0; i < mainSteps.length; i++) {
-      check(
-        mainSteps[i] === expectedStart + i,
-        `skills/${mode}/${guide} main step sequence has a gap: expected ${expectedStart + i}, found ${mainSteps[i]}`,
-      );
-    }
+  for (const [dir, ...guides] of SKILL_GUIDES) {
+    for (const guide of guides) checkGuideSteps(`skills/${dir}/${guide}`);
 
     // SKILL.md Process section must exist and have at least one numbered item
-    const skillText = readText(`skills/${mode}/SKILL.md`);
-    const processMatch = skillText.match(/## Process\r?\n([\s\S]*?)(?=\r?\n##|$)/);
+    const skillText = readText(`skills/${dir}/SKILL.md`);
+    const processMatch = skillText.match(/## Process\n([\s\S]*?)(?=\n##|$)/);
     check(
       processMatch !== null,
-      `skills/${mode}/SKILL.md has no ## Process section`,
+      `skills/${dir}/SKILL.md has no ## Process section`,
     );
     if (processMatch) {
       check(
         /^\d+\./m.test(processMatch[1]),
-        `skills/${mode}/SKILL.md Process section has no numbered items`,
+        `skills/${dir}/SKILL.md Process section has no numbered items`,
       );
     }
   }
 }
 
 function checkSkillsContent() {
-  const modes = SKILL_GUIDES.map(([mode]) => mode);
-
   // Guard: _shared/ must never contain a SKILL.md — it is a shared library directory,
   // not a skill. If one is added accidentally, Claude Code would register it as a broken skill.
   let sharedHasSkillMd = false;
@@ -236,10 +290,10 @@ function checkSkillsContent() {
   } catch (_) { /* expected — file should not exist */ }
   check(!sharedHasSkillMd, "skills/_shared/SKILL.md must not exist — _shared/ is a library, not a skill");
 
-  for (const mode of modes) {
-    const skillMd = readText(`skills/${mode}/SKILL.md`);
-    check(skillMd.includes("## Setup"), `skills/${mode}/SKILL.md should have a ## Setup section`);
-    check(skillMd.includes("## Process"), `skills/${mode}/SKILL.md should have a ## Process section`);
+  for (const [dir, ...guides] of SKILL_GUIDES) {
+    const skillMd = readText(`skills/${dir}/SKILL.md`);
+    check(skillMd.includes("## Setup"), `skills/${dir}/SKILL.md should have a ## Setup section`);
+    check(skillMd.includes("## Process"), `skills/${dir}/SKILL.md should have a ## Process section`);
 
     // Guard: SKILL.md frontmatter description must reference the current book count.
     // Positive assertion — self-updates when sourceWord changes with the book inventory.
@@ -248,26 +302,27 @@ function checkSkillsContent() {
     const frontmatter = frontmatterMatch ? frontmatterMatch[1] : "";
     check(
       frontmatter.includes(`${sourceWord} classic`),
-      `skills/${mode}/SKILL.md frontmatter description should reference "${sourceWord} classic engineering books" — update stale book count`,
+      `skills/${dir}/SKILL.md frontmatter description should reference "${sourceWord} classic engineering books" — update stale book count`,
     );
-  }
 
-  const guides = SKILL_GUIDES;
-
-  for (const [mode, guide] of guides) {
-    const content = readText(`skills/${mode}/${guide}`);
-    check(
-      content.includes("Iron Law"),
-      `skills/${mode}/${guide} should reference the Iron Law`,
-    );
+    for (const guide of guides) {
+      check(
+        readText(`skills/${dir}/${guide}`).includes("Iron Law"),
+        `skills/${dir}/${guide} should reference the Iron Law`,
+      );
+    }
   }
 }
 
+// Every shipped mode needs at least one scenario. This replaced a hardcoded
+// ">= 49 scenarios" floor: that number stopped tracking reality the moment the
+// suite grew past it, and run-evals.mjs already enforces per-risk-code coverage.
+// Mode coverage is the invariant neither check owned.
 function checkEvalSuite() {
-  check(
-    evalCount >= 49,
-    `evals/evals.json should include at least 49 benchmark scenarios (found ${evalCount})`,
-  );
+  const modes = new Set(evals.evals.map((ev) => ev.mode));
+  for (const mode of VALID_MODES) {
+    check(modes.has(mode), `evals/evals.json has no scenario for mode '${mode}'`);
+  }
 }
 
 function checkContributing() {
@@ -278,15 +333,115 @@ function checkContributing() {
   );
 }
 
+// AGENTS.md and GEMINI.md are near-duplicates that Codex CLI and Gemini CLI are
+// each told to prioritize, so they have to stay factually identical. Checking only
+// AGENTS.md is what let GEMINI.md quietly lose the eval count and the benchmark
+// corpus, and let both keep advertising balanced-only scoring after strictness
+// presets shipped.
+const AGENT_DOCS = ["AGENTS.md", "GEMINI.md"];
+// Backticked, as the scoring table writes them. A bare "strict" would also match
+// inside the word "strictness" and pass on a doc that never lists the presets.
+const STRICTNESS_PRESETS = ["`strict`", "`balanced`", "`legacy-friendly`"];
+
 function checkAgentsDocs() {
-  const agents = readText("AGENTS.md");
+  for (const file of AGENT_DOCS) {
+    const text = readText(file);
+    check(
+      text.includes(`${sourceWord} classic engineering books`),
+      `${file} should describe the repository as grounded in ${sourceWord} classic engineering books`,
+    );
+    check(
+      text.includes(`${evalCount} scenarios`),
+      `${file} should mention the current eval suite (${evalCount} scenarios)`,
+    );
+    for (const preset of STRICTNESS_PRESETS) {
+      check(
+        text.includes(preset),
+        `${file} should document the '${preset}' strictness preset — its scoring table is stale`,
+      );
+    }
+  }
+}
+
+// Every docs/<name>-setup.md must be linked from all six READMEs and the
+// getting-started table, and every platform the installer accepts must appear in
+// each document's `<platform> = …` list. Linking alone was not enough: IBM Bob
+// arrived with its setup guide linked everywhere and its name missing from every
+// enumeration but the English one.
+function checkPlatformDocs() {
+  const guides = setupGuides(root);
+  const { declared } = parseInstallerPlatforms(readText("scripts/install.sh"));
+  check(guides.length > 0, "docs/ should contain at least one <platform>-setup.md guide");
+
+  for (const file of platformDocs(root)) {
+    const text = readText(file);
+    const linked = linkedSetupGuides(text);
+    for (const guide of guides) {
+      check(linked.includes(guide), `${file} is missing an install-table link to docs/${guide}`);
+    }
+    for (const link of linked) {
+      check(guides.includes(link), `${file} links to docs/${link}, which does not exist`);
+    }
+    const enumeration = platformEnumeration(text);
+    if (enumeration === "") {
+      check(false, `${file} has no '<platform> = …' list of the installer's platforms`);
+      continue;
+    }
+    for (const platform of declared) {
+      check(
+        namesPlatform(enumeration, platform),
+        `${file} omits '${platform}' from its '<platform> = …' list, which scripts/install.sh accepts`,
+      );
+    }
+  }
+}
+
+function checkInstallerPlatforms() {
+  const { declared, global: globalArms, project } = parseInstallerPlatforms(readText("scripts/install.sh"));
+  check(declared.length > 0, "scripts/install.sh should declare a PLATFORMS list");
+
+  for (const [arms, fn] of [[globalArms, "global_dir"], [project, "project_dir"]]) {
+    for (const platform of declared) {
+      check(arms.includes(platform), `scripts/install.sh ${fn}() has no path for PLATFORMS entry '${platform}'`);
+    }
+    for (const platform of arms) {
+      check(declared.includes(platform), `scripts/install.sh ${fn}() maps '${platform}', which PLATFORMS omits`);
+    }
+  }
+}
+
+// OpenCode v2 shadows nothing and auto-registers nothing: a skill reaches the
+// `/` menu only by opting in with metadata.opencode/slash. No other platform
+// reads the flag, so nothing else fails when a new skill ships without it —
+// this check is the only thing standing between a seventh skill and a silently
+// missing /brooks-* on OpenCode. Scans the directory rather than the mode
+// registry so an unregistered skill folder is caught too; _shared/ has no
+// SKILL.md and is skipped by construction.
+function checkOpencodeSlashFlag() {
+  const skillDirs = readdirSync(path.join(root, "skills"), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .filter((dir) => existsSync(path.join(root, "skills", dir, "SKILL.md")))
+    .sort();
+
+  check(skillDirs.length > 0, "skills/ contains no SKILL.md — expected at least one skill");
+
+  for (const dir of skillDirs) {
+    check(
+      hasOpencodeSlashFlag(readText(`skills/${dir}/SKILL.md`)),
+      `skills/${dir}/SKILL.md frontmatter needs metadata: opencode/slash: "true" — without it the skill never appears in OpenCode's / menu`,
+    );
+  }
+}
+
+// assets/star-history.svg is a pure function of assets/star-history.json, so a
+// mismatch means the chart was hand-edited or the data moved without a redraw.
+// Re-rendering here needs no credentials, which is the point of committing the
+// data rather than the drawing alone.
+function checkStarHistory() {
   check(
-    agents.includes(`${sourceWord} classic engineering books`),
-    `AGENTS.md should describe the repository as grounded in ${sourceWord} classic engineering books`,
-  );
-  check(
-    agents.includes(`${evalCount} scenarios`),
-    `AGENTS.md should mention the expanded eval suite (${evalCount} scenarios)`,
+    renderStarHistory(readStarStamps()) === readText("assets/star-history.svg"),
+    "assets/star-history.svg does not match assets/star-history.json — rerun `node scripts/gen-star-history.mjs --render-only`",
   );
 }
 
@@ -300,16 +455,16 @@ function checkSecurity() {
 }
 
 function checkHookOutput() {
-  function runHook(env = {}, shellPrefix = "") {
+  function runHook(env = {}) {
     const tempHome = mkdtempSync(path.join(os.tmpdir(), "brooks-lint-hook-home-"));
-    const hookEnv = { ...process.env, HOME: tempHome, ...env };
-    if (shellPrefix.includes("CLAUDE_PLUGIN_ROOT")) delete hookEnv.CURSOR_PLUGIN_ROOT;
-    const commandArgs = shellPrefix
-      ? ["-lc", `${shellPrefix} ./hooks/session-start`]
-      : ["hooks/session-start"];
-    const stdout = execFileSync("bash", commandArgs, {
+    // The hook branches on CLAUDE_PLUGIN_ROOT, so it must never leak in from the
+    // surrounding shell: a maintainer running `npm run validate` from inside
+    // Claude Code would otherwise get the plugin-shaped output for the default
+    // run and fail a check that has nothing to do with their change.
+    const { CLAUDE_PLUGIN_ROOT: _pluginRoot, ...baseEnv } = process.env;
+    const stdout = execFileSync(process.execPath, [path.join(root, "hooks", "session-start.mjs")], {
       cwd: root,
-      env: hookEnv,
+      env: { ...baseEnv, HOME: tempHome, ...env },
       encoding: "utf8",
     });
     return JSON.parse(stdout);
@@ -318,7 +473,7 @@ function checkHookOutput() {
   const defaultOut = runHook();
   check(typeof defaultOut.additional_context === "string", "hooks/session-start default output must include additional_context");
 
-  const claudeOut = runHook({}, "CLAUDE_PLUGIN_ROOT=1");
+  const claudeOut = runHook({ CLAUDE_PLUGIN_ROOT: "1" });
   check(claudeOut.hookSpecificOutput?.hookEventName === "SessionStart", "hooks/session-start Claude output must include hookSpecificOutput.hookEventName");
   check(typeof claudeOut.hookSpecificOutput?.additionalContext === "string", "hooks/session-start Claude output must include hookSpecificOutput.additionalContext");
 }
@@ -328,6 +483,8 @@ function checkHookOutput() {
 checkVersionConsistency();
 checkDescriptionConsistency();
 checkChangelog();
+checkChangelogCoverage();
+checkVersionRefs();
 checkReadmeIntegrity();
 checkConfigExamples();
 checkSourceInventory();
@@ -337,7 +494,11 @@ checkStepAlignment();
 checkEvalSuite();
 checkContributing();
 checkAgentsDocs();
+checkPlatformDocs();
+checkInstallerPlatforms();
+checkOpencodeSlashFlag();
 checkSecurity();
+checkStarHistory();
 checkHookOutput();
 
 // ── Report ─────────────────────────────────────────────────────────────────
