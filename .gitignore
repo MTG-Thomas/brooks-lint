@@ -18,6 +18,9 @@ env/
 Thumbs.db
 *.skill
 
+# Dependencies
+node_modules/
+
 # Browser automation artifacts
 .playwright-mcp/
 

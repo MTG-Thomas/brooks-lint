@@ -26,7 +26,7 @@ MemPalace as the expert-context substrate.
 
    ```powershell
    C:\Users\ThomasBray\.mempalace\bin\mempalace.ps1 export brooks-context `
-     --repo C:\Users\ThomasBray\src\hyhmrright\brooks-lint `
+     --repo C:\Users\ThomasBray\src\MTG-Thomas\brooks-lint `
      --lenses brooks philosophy-of-software-design `
      --max-principles 8
    ```
@@ -36,7 +36,7 @@ MemPalace as the expert-context substrate.
 
    ```powershell
    C:\Users\ThomasBray\.mempalace\bin\mempalace.ps1 export brooks-context `
-     --repo C:\Users\ThomasBray\src\hyhmrright\brooks-lint `
+     --repo C:\Users\ThomasBray\src\MTG-Thomas\brooks-lint `
      --knowledge-note "C:\Users\ThomasBray\OneDrive - Midtown Technology Group LLC\Knowledge\pages\topic.software-design.md" `
      --knowledge-reference-out "C:\Users\ThomasBray\OneDrive - Midtown Technology Group LLC\Knowledge\pages\reference.brooks-lint-mempalace.md"
    ```
