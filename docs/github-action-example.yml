@@ -19,11 +19,13 @@ jobs:
 
       # Pin to a release tag. `@main` would silently re-point at unreviewed
       # changes on every run — including the Anthropic SDK version the action
-      # installs. Bump this deliberately.
-      - uses: hyhmrright/brooks-lint/.github/actions/brooks-lint@v1.4.3
+      # installs. Bump this deliberately. (opencode-api-key mode installs no
+      # dependencies at all.)
+      - uses: hyhmrright/brooks-lint/.github/actions/brooks-lint@v1.7.0
         with:
           mode: review
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # opencode-api-key: ${{ secrets.OPENCODE_API_KEY }}  # instead: OpenCode Zen/Go models, no Anthropic key
           fail-below: 70  # fail the check if Health Score drops below 70
           # fail-on: critical            # fail on any Critical finding (none | warning | critical)
           # fail-on-regression: true     # fail if the Health Score dropped vs the last run

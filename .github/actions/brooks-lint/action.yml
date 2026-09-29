@@ -7,8 +7,11 @@ inputs:
     description: "Review mode: review, audit, debt, test, health, sweep"
     default: "review"
   anthropic-api-key:
-    description: "Anthropic API key"
-    required: true
+    description: "Anthropic API key (set this or opencode-api-key, exactly one)"
+    required: false
+  opencode-api-key:
+    description: "OpenCode API key (Zen or Go) to run non-Anthropic models over OpenAI-compatible chat completions"
+    required: false
   fail-below:
     description: "Fail the check if Health Score is below this threshold (0 = never fail)"
     default: "0"
@@ -22,11 +25,14 @@ inputs:
     description: "Path to write a SARIF report for GitHub Code Scanning (empty = skip SARIF)"
     default: ""
   model:
-    description: "Claude model to use"
-    default: "claude-sonnet-4-6"
-  api-base-url:
-    description: "Anthropic-compatible /v1/messages endpoint to call instead of api.anthropic.com (empty = Anthropic)"
+    description: "Model id (default: claude-sonnet-4-6 with anthropic-api-key, kimi-k3 with opencode-api-key)"
     default: ""
+  api-base-url:
+    description: "Override the API base: an Anthropic-compatible /v1/messages endpoint in anthropic mode, or an OpenCode gateway base such as https://opencode.ai/zen/v1 in opencode mode (empty = provider default)"
+    default: ""
+  api-protocol:
+    description: "OpenCode endpoint protocol: auto routes gpt-/grok-/muse- models to /responses and everything else to /chat/completions; set chat or responses to force it"
+    default: "auto"
 
 outputs:
   score:
@@ -43,7 +49,7 @@ runs:
     - name: Setup Node
       uses: actions/setup-node@v4
       with:
-        node-version: 20
+        node-version: 22
 
     # github.action_path points at this directory (.github/actions/brooks-lint),
     # NOT at the checked-out action repository — but scripts/ and skills/ live at
@@ -58,40 +64,74 @@ runs:
         # cache key and the install below can never pin different things.
         echo "BROOKS_LINT_SDK=$(node -p "require('$root/package.json').devDependencies['@anthropic-ai/sdk']")" >> "$GITHUB_ENV"
 
+    - name: Configure provider
+      id: provider
+      shell: bash
+      env:
+        ANTHROPIC_KEY: ${{ inputs.anthropic-api-key }}
+        OPENCODE_KEY: ${{ inputs.opencode-api-key }}
+        MODEL_IN: ${{ inputs.model }}
+        API_BASE_URL: ${{ inputs.api-base-url }}
+      run: |
+        # Exactly one key: mixing them would make the model default and the
+        # dependency-install step disagree about which API this run talks to.
+        if [ -n "$ANTHROPIC_KEY" ] && [ -n "$OPENCODE_KEY" ]; then
+          echo "Set exactly one of anthropic-api-key or opencode-api-key" >&2
+          exit 1
+        fi
+        if [ -z "$ANTHROPIC_KEY" ] && [ -z "$OPENCODE_KEY" ]; then
+          echo "Set anthropic-api-key or opencode-api-key" >&2
+          exit 1
+        fi
+        if [ -n "$OPENCODE_KEY" ]; then
+          provider=opencode
+          model="${MODEL_IN:-kimi-k3}"
+          echo "OPENCODE_API_KEY=$OPENCODE_KEY" >> "$GITHUB_ENV"
+          if [ -n "$API_BASE_URL" ]; then
+            echo "OPENCODE_BASE_URL=$API_BASE_URL" >> "$GITHUB_ENV"
+          fi
+        else
+          provider=anthropic
+          model="${MODEL_IN:-claude-sonnet-4-6}"
+          echo "ANTHROPIC_API_KEY=$ANTHROPIC_KEY" >> "$GITHUB_ENV"
+          if [ -n "$API_BASE_URL" ]; then
+            echo "ANTHROPIC_BASE_URL=$API_BASE_URL" >> "$GITHUB_ENV"
+          fi
+        fi
+        echo "provider=$provider" >> "$GITHUB_OUTPUT"
+        echo "model=$model" >> "$GITHUB_OUTPUT"
+
     - name: Cache SDK
       id: cache
+      if: steps.provider.outputs.provider == 'anthropic'
       uses: actions/cache@v4
       with:
         path: ${{ env.BROOKS_LINT_ROOT }}/node_modules
         key: brooks-lint-sdk-${{ runner.os }}-${{ env.BROOKS_LINT_SDK }}
 
     - name: Install dependencies
-      if: steps.cache.outputs.cache-hit != 'true'
+      if: steps.provider.outputs.provider == 'anthropic' && steps.cache.outputs.cache-hit != 'true'
       shell: bash
       run: npm install --prefix "$BROOKS_LINT_ROOT" "@anthropic-ai/sdk@$BROOKS_LINT_SDK"
 
     - name: Run Brooks-Lint
       shell: bash
       env:
-        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
-        API_BASE_URL: ${{ inputs.api-base-url }}
+        PROVIDER: ${{ steps.provider.outputs.provider }}
+        MODEL: ${{ steps.provider.outputs.model }}
+        API_PROTOCOL: ${{ inputs.api-protocol }}
         SARIF_FILE: ${{ inputs.sarif-file }}
         MODE: ${{ inputs.mode }}
-        MODEL: ${{ inputs.model }}
       run: |
-        # Exported only when the input is set: naming ANTHROPIC_BASE_URL in the
-        # env block above would blank out one inherited from the job env. The
-        # SDK reads the variable itself, so nothing downstream needs a flag.
-        if [ -n "$API_BASE_URL" ]; then
-          export ANTHROPIC_BASE_URL="$API_BASE_URL"
-        fi
         sarif_arg=()
         if [ -n "$SARIF_FILE" ]; then
           sarif_arg=(--sarif-out "$SARIF_FILE")
         fi
         node "$BROOKS_LINT_ROOT/scripts/ci-review.mjs" \
           --mode "$MODE" \
+          --provider "$PROVIDER" \
           --model "$MODEL" \
+          --api-protocol "$API_PROTOCOL" \
           --skills-dir "$BROOKS_LINT_ROOT/skills" \
           --project-dir "$GITHUB_WORKSPACE" \
           "${sarif_arg[@]}" \

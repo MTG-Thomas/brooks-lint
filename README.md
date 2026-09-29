@@ -427,7 +427,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: hyhmrright/brooks-lint/.github/actions/brooks-lint@v1.4.3
+      - uses: hyhmrright/brooks-lint/.github/actions/brooks-lint@v1.7.0
         with:
           mode: review
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -462,6 +462,19 @@ The action posts the review as a PR comment and optionally fails the check if th
 ```
 
 brooks-lint sends your diff to whatever host you name here, so only point it at one you trust with your source. Running `scripts/ci-review.mjs` yourself needs no flag at all — the Anthropic SDK reads `ANTHROPIC_BASE_URL` directly.
+
+**OpenCode (no Anthropic models).** Swap `anthropic-api-key` for `opencode-api-key` to run the identical methodology — prompt assembly, Health Score, Iron Law parsing, SARIF export, quality gates — on OpenCode's Zen or Go gateways over the OpenAI-compatible `/chat/completions` endpoint:
+
+```yaml
+        with:
+          mode: review
+          opencode-api-key: ${{ secrets.OPENCODE_API_KEY }}
+          model: kimi-k3            # optional — defaults to kimi-k3
+          # api-protocol: responses  # optional — auto-routes gpt-/grok-/muse- models already
+          # api-base-url: https://opencode.ai/zen/v1   # optional — defaults to the Go gateway
+```
+
+Name the secret `OPENCODE_API_KEY` to match the OpenCode CLI's own variable, and set exactly one of the two key inputs. Both OpenCode endpoints are supported: `/chat/completions` (Kimi, DeepSeek, GLM, MiMo, LongCat) and `/responses` (GPT, Grok, Muse) — the protocol is derived from the model id (`gpt-*`, `grok-*`, `muse-*` go to `/responses`) and can be forced with `api-protocol: chat|responses`; see the [Go model list](https://opencode.ai/docs/go) for which family a model belongs to. OpenCode mode also skips the SDK install entirely, so those runs are dependency-free. Standalone, export `OPENCODE_API_KEY` (plus optional `OPENCODE_BASE_URL`) and pass `--provider opencode --model <id>` to `scripts/ci-review.mjs` — with only that key in the environment, the provider is detected automatically and `@anthropic-ai/sdk` is never imported; add `--api-protocol chat|responses` only to override the auto-routing.
 
 **Cost:** ~$0.05–0.15 per PR run depending on diff size and model. Recommend running on `pull_request` events only.
 

@@ -52,6 +52,14 @@ import {
   platformEnumeration,
   namesPlatform,
 } from "./platforms.mjs";
+import {
+  OPENCODE_DEFAULT_BASE_URL,
+  buildCompletionRequest,
+  completionUrl,
+  extractCompletionText,
+  postCompletion,
+  resolveApiProtocol,
+} from "./openai-compat.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -68,6 +76,13 @@ function test(name, fn) {
     console.error(`    ${err.message}`);
     failed++;
   }
+}
+
+// The runner is synchronous by design; async cases queue here and drain just
+// before the summary so promises can never race the final count.
+const asyncTests = [];
+function testAsync(name, fn) {
+  asyncTests.push({ name, fn });
 }
 
 // ── parseFrontmatterBooks ──────────────────────────────────────────────────
@@ -1121,6 +1136,174 @@ test("parses the real installer, proving the patterns still match", () => {
   assert.deepEqual(new Set(project), new Set(declared));
 });
 
+// ── openai-compat: OpenCode chat-completions client ───────────────────────
+
+console.log("\nopenai-compat");
+
+test("completionUrl picks the endpoint per protocol without duplicate slashes", () => {
+  assert.equal(completionUrl("https://opencode.ai/zen/go/v1"), "https://opencode.ai/zen/go/v1/chat/completions");
+  assert.equal(completionUrl("https://example.com/gateway/"), "https://example.com/gateway/chat/completions");
+  assert.equal(completionUrl("https://opencode.ai/zen/go/v1", "responses"), "https://opencode.ai/zen/go/v1/responses");
+});
+
+test("resolveApiProtocol routes the Responses-only model families", () => {
+  assert.equal(resolveApiProtocol("gpt-6-luna"), "responses");
+  assert.equal(resolveApiProtocol("grok-4.7"), "responses");
+  assert.equal(resolveApiProtocol("muse-spark-1.3-contributor"), "responses");
+  assert.equal(resolveApiProtocol("kimi-k3"), "chat");
+  assert.equal(resolveApiProtocol("deepseek-v4-flash"), "chat");
+});
+
+test("resolveApiProtocol lets an explicit protocol win over the model id", () => {
+  assert.equal(resolveApiProtocol("kimi-k3", "responses"), "responses");
+  assert.equal(resolveApiProtocol("gpt-6-luna", "chat"), "chat");
+});
+
+test("buildCompletionRequest sends system then user with a token cap", () => {
+  assert.deepEqual(
+    buildCompletionRequest("chat", { model: "kimi-k3", system: "be strict", user: "review this", maxTokens: 1024 }),
+    {
+      model: "kimi-k3",
+      max_tokens: 1024,
+      messages: [
+        { role: "system", content: "be strict" },
+        { role: "user", content: "review this" },
+      ],
+    },
+  );
+});
+
+test("buildCompletionRequest uses the Responses instructions/input shape", () => {
+  assert.deepEqual(
+    buildCompletionRequest("responses", { model: "gpt-6-luna", system: "be strict", user: "review this", maxTokens: 8192 }),
+    {
+      model: "gpt-6-luna",
+      instructions: "be strict",
+      input: "review this",
+      max_output_tokens: 8192,
+    },
+  );
+});
+
+test("extractCompletionText reads classic chat string content", () => {
+  assert.equal(extractCompletionText("chat", { choices: [{ message: { content: "# report" } }] }), "# report");
+});
+
+test("extractCompletionText joins chat text parts and skips non-text parts", () => {
+  const payload = {
+    choices: [{
+      message: {
+        content: [
+          { type: "thinking", thinking: "…" },
+          { type: "text", text: "part one " },
+          { type: "text", text: "part two" },
+        ],
+      },
+    }],
+  };
+  assert.equal(extractCompletionText("chat", payload), "part one part two");
+});
+
+test("extractCompletionText yields an empty report instead of throwing on a contentless choice", () => {
+  assert.equal(extractCompletionText("chat", { choices: [{ message: {} }] }), "");
+  assert.equal(extractCompletionText("chat", {}), "");
+  assert.equal(extractCompletionText("chat", null), "");
+});
+
+test("extractCompletionText skips reasoning items in Responses output", () => {
+  const payload = {
+    output: [
+      { type: "reasoning", summary: [] },
+      { type: "message", content: [{ type: "output_text", text: "# report" }] },
+    ],
+  };
+  assert.equal(extractCompletionText("responses", payload), "# report");
+});
+
+test("extractCompletionText joins multiple Responses messages and falls back to output_text", () => {
+  const payload = {
+    output: [
+      { type: "message", content: [{ type: "output_text", text: "part one " }] },
+      { type: "message", content: [{ type: "output_text", text: "part two" }] },
+    ],
+  };
+  assert.equal(extractCompletionText("responses", payload), "part one part two");
+  assert.equal(extractCompletionText("responses", { output_text: "fallback" }), "fallback");
+  assert.equal(extractCompletionText("responses", { output: [{ type: "reasoning" }] }), "");
+});
+
+testAsync("postCompletion sends Bearer auth, session headers, and the request body", async () => {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    return { ok: true, status: 200, statusText: "OK", json: async () => ({ choices: [{ message: { content: "ok" } }] }) };
+  };
+  const payload = await postCompletion({
+    baseURL: "https://opencode.ai/zen/go/v1",
+    apiKey: "key-123",
+    model: "kimi-k3",
+    system: "sys",
+    user: "usr",
+    session: "brooks-lint-review-42",
+    userAgent: "brooks-lint/1.7.0",
+    fetchImpl,
+  });
+  assert.equal(payload.choices[0].message.content, "ok");
+  assert.equal(calls[0].url, "https://opencode.ai/zen/go/v1/chat/completions");
+  assert.equal(calls[0].init.headers.authorization, "Bearer key-123");
+  assert.equal(calls[0].init.headers["x-opencode-session"], "brooks-lint-review-42");
+  assert.equal(calls[0].init.headers["user-agent"], "brooks-lint/1.7.0");
+  const body = JSON.parse(calls[0].init.body);
+  assert.equal(body.model, "kimi-k3");
+  assert.equal(body.messages[0].role, "system");
+});
+
+testAsync("postCompletion posts Responses payloads to /responses", async () => {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    return { ok: true, status: 200, statusText: "OK", json: async () => ({}) };
+  };
+  await postCompletion({
+    protocol: "responses",
+    apiKey: "k",
+    model: "gpt-6-luna",
+    system: "s",
+    user: "u",
+    fetchImpl,
+  });
+  assert.equal(calls[0].url, `${OPENCODE_DEFAULT_BASE_URL}/responses`);
+  const body = JSON.parse(calls[0].init.body);
+  assert.equal(body.instructions, "s");
+  assert.equal(body.input, "u");
+});
+
+testAsync("postCompletion defaults to the OpenCode Go gateway", async () => {
+  let seen;
+  await postCompletion({
+    apiKey: "k",
+    model: "m",
+    system: "s",
+    user: "u",
+    fetchImpl: async (url) => { seen = url; return { ok: true, json: async () => ({}) }; },
+  });
+  assert.equal(seen, `${OPENCODE_DEFAULT_BASE_URL}/chat/completions`);
+});
+
+testAsync("postCompletion throws with status and body when the gateway rejects", async () => {
+  const fetchImpl = async () => ({
+    ok: false,
+    status: 401,
+    statusText: "Unauthorized",
+    text: async () => "invalid key",
+    json: async () => ({}),
+  });
+  await assert.rejects(
+    postCompletion({ apiKey: "bad", model: "kimi-k3", system: "s", user: "u", fetchImpl }),
+    /HTTP 401 Unauthorized — invalid key/,
+  );
+});
+
 // ── Integration: validate-repo.mjs passes against current repo ─────────────
 
 console.log("\nvalidate-repo integration");
@@ -1556,6 +1739,18 @@ test("extractChangelogSection returns an empty string when there is no release h
 });
 
 // ── Summary ────────────────────────────────────────────────────────────────
+
+for (const { name, fn } of asyncTests) {
+  try {
+    await fn();
+    console.log(`  ✓ ${name}`);
+    passed++;
+  } catch (err) {
+    console.error(`  ✗ ${name}`);
+    console.error(`    ${err.message}`);
+    failed++;
+  }
+}
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

@@ -1,43 +1,58 @@
 /**
- * CI entry point — runs a brooks-lint mode via Anthropic SDK.
+ * CI entry point — runs a brooks-lint mode via the Anthropic SDK or the
+ * OpenCode gateways (Zen/Go) over OpenAI-compatible chat completions.
  * Shared prompt assembly with run-evals-live.mjs (via assemble-prompt.mjs).
  *
  * Reads git diff from the project, assembles the system prompt for the mode,
- * calls Claude API, and outputs JSON { report, score, mode, scope, trend,
+ * calls the model API, and outputs JSON { report, score, mode, scope, trend,
  * findings, previousScore, delta } to stdout. With --format sarif it emits a
  * SARIF 2.1.0 log instead (for GitHub Code Scanning).
  *
  * Usage:
  *   node scripts/ci-review.mjs \
  *     --mode review \
- *     --model claude-sonnet-4-6 \
+ *     [--provider anthropic|opencode] \
+ *     [--model claude-sonnet-4-6] \
+ *     [--api-protocol auto|chat|responses] \
  *     --skills-dir ./skills \
  *     --project-dir /path/to/project \
  *     [--format json|sarif] \
  *     [--sarif-out brooks-lint.sarif]
  *
  * Environment:
- *   ANTHROPIC_API_KEY  required
+ *   ANTHROPIC_API_KEY   required unless OPENCODE_API_KEY is set
+ *   OPENCODE_API_KEY    selects the OpenCode provider when Anthropic's is absent
+ *   OPENCODE_BASE_URL   optional gateway base (default https://opencode.ai/zen/go/v1)
  */
 
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import Anthropic from "@anthropic-ai/sdk";
 import { assembleSystemPrompt, VALID_MODES } from "./assemble-prompt.mjs";
 import { readHistory, getTrend } from "./history.mjs";
 import { countFindings } from "./report-parse.mjs";
 import { reportToSarif } from "./sarif.mjs";
 import { parseArgs } from "./cli-utils.mjs";
+import {
+  API_PROTOCOLS,
+  OPENCODE_DEFAULT_BASE_URL,
+  extractCompletionText,
+  postCompletion,
+  resolveApiProtocol,
+} from "./openai-compat.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const args = parseArgs(process.argv.slice(2));
 
 const mode = args.mode ?? "review";
-const model = args.model ?? "claude-sonnet-4-6";
+const provider = args.provider ?? (
+  process.env.OPENCODE_API_KEY && !process.env.ANTHROPIC_API_KEY ? "opencode" : "anthropic"
+);
+const model = args.model ?? (provider === "opencode" ? null : "claude-sonnet-4-6");
 const format = args.format ?? "json";
+const apiProtocol = args["api-protocol"] ?? "auto";
 const skillsDir = path.resolve(args["skills-dir"] ?? path.join(__dirname, "..", "skills"));
 const projectDir = path.resolve(args["project-dir"] ?? process.cwd());
 const toolVersion = JSON.parse(
@@ -49,8 +64,28 @@ if (!VALID_MODES.includes(mode)) {
   process.exit(1);
 }
 
+if (!["anthropic", "opencode"].includes(provider)) {
+  console.error(`Unknown provider: ${provider}. Valid providers: anthropic, opencode`);
+  process.exit(1);
+}
+
+if (provider === "opencode" && !model) {
+  console.error("OpenCode mode requires --model (e.g. kimi-k3, deepseek-v4-flash, glm-5.3)");
+  process.exit(1);
+}
+
+if (provider === "opencode" && !process.env.OPENCODE_API_KEY) {
+  console.error("OpenCode mode requires OPENCODE_API_KEY");
+  process.exit(1);
+}
+
 if (!["json", "sarif"].includes(format)) {
   console.error(`Unknown format: ${format}. Valid formats: json, sarif`);
+  process.exit(1);
+}
+
+if (!API_PROTOCOLS.includes(apiProtocol)) {
+  console.error(`Unknown api protocol: ${apiProtocol}. Valid protocols: ${API_PROTOCOLS.join(", ")}`);
   process.exit(1);
 }
 
@@ -79,8 +114,6 @@ function getGitDiff(projectRoot) {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
-const client = new Anthropic();
-
 const { diff, scope } = getGitDiff(projectDir);
 const systemPrompt = assembleSystemPrompt(mode, skillsDir, projectDir);
 
@@ -88,22 +121,48 @@ const userMessage = diff
   ? `Run brooks-lint ${mode} mode on the following diff.\n\nScope: ${scope}\n\n\`\`\`diff\n${diff}\n\`\`\``
   : `Run brooks-lint ${mode} mode on this project.\n\nScope: ${scope}`;
 
-let message;
-try {
-  message = await client.messages.create({
-    model,
-    max_tokens: 4096,
-    system: systemPrompt,
-    messages: [{ role: "user", content: userMessage }],
-  });
-} catch (err) {
-  console.error(JSON.stringify({ error: err.message, mode, scope }, null, 2));
-  process.exit(1);
+let report;
+if (provider === "opencode") {
+  const protocol = resolveApiProtocol(model, apiProtocol);
+  try {
+    const payload = await postCompletion({
+      protocol,
+      baseURL: process.env.OPENCODE_BASE_URL ?? OPENCODE_DEFAULT_BASE_URL,
+      apiKey: process.env.OPENCODE_API_KEY,
+      model,
+      system: systemPrompt,
+      user: userMessage,
+      // Responses models reason before answering and bill those tokens
+      // against the same cap, so they need more headroom than chat replies.
+      maxTokens: protocol === "responses" ? 8192 : 4096,
+      session: `brooks-lint-${mode}-${process.env.GITHUB_RUN_ID ?? "local"}`,
+      userAgent: `brooks-lint/${toolVersion}`,
+    });
+    report = extractCompletionText(protocol, payload);
+  } catch (err) {
+    console.error(JSON.stringify({ error: err.message, mode, scope }, null, 2));
+    process.exit(1);
+  }
+} else {
+  // Imported lazily so OpenCode mode runs without node_modules present.
+  let message;
+  try {
+    const { default: Anthropic } = await import("@anthropic-ai/sdk");
+    const client = new Anthropic();
+    message = await client.messages.create({
+      model,
+      max_tokens: 4096,
+      system: systemPrompt,
+      messages: [{ role: "user", content: userMessage }],
+    });
+  } catch (err) {
+    console.error(JSON.stringify({ error: err.message, mode, scope }, null, 2));
+    process.exit(1);
+  }
+  // The first block is not always the text one — an endpoint that returns a
+  // thinking block first would otherwise yield undefined.
+  report = message.content.find((block) => block.type === "text")?.text ?? "";
 }
-
-// The first block is not always the text one — an endpoint that returns a
-// thinking block first would otherwise yield undefined.
-const report = message.content.find((block) => block.type === "text")?.text ?? "";
 
 const scoreMatch = report.match(/Health\s+Score[:\s]+(\d+)/i);
 const score = scoreMatch ? parseInt(scoreMatch[1], 10) : null;
