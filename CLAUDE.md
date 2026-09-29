@@ -4,48 +4,82 @@ Guidance for Claude Code when modifying this repository. For repo layout, instal
 
 ## What This Repo Is
 
-**brooks-lint** is a Claude Code Plugin for code-quality diagnosis grounded in twelve classic software engineering books. Five independent skills under `skills/` (PR Review, Architecture Audit, Tech Debt, Test Quality, Health Dashboard) each produce findings in the Iron Law form: **Symptom → Source → Consequence → Remedy**.
+**brooks-lint** is a Claude Code Plugin for code-quality diagnosis grounded in twelve classic software engineering books. Six independent skills under `skills/` (PR Review, Architecture Audit, Tech Debt, Test Quality, Health Dashboard, Full Sweep) each produce findings in the Iron Law form: **Symptom → Source → Consequence → Remedy**.
+
+## Harness: brooks-lint maintenance
+
+**Goal:** drive changes *to brooks-lint itself* through a verified pipeline so manifests, evals, docs, and trigger boundaries never drift.
+
+**Trigger:** when working ON the plugin — add/edit a skill or guide, refresh the eval suite, fix trigger descriptions, or cut a release — use the `brooks-harness` skill. It runs a sequential subagent pipeline (`.claude/agents/`): **skill-author → eval-curator → consistency-qa → trigger-boundary-auditor → release-manager**. Simple questions, or *using* the analysis skills on some target codebase, do not trigger it.
+
+**Change history:**
+| Date | Change | Target | Reason |
+|------|--------|--------|--------|
+| 2026-06-01 | Initial harness: 5-stage pipeline orchestrator + 4 new agents (skill-author, eval-curator, consistency-qa, release-manager), reusing trigger-boundary-auditor | `.claude/agents/`, `.claude/skills/brooks-harness/` | Pre-existing dev tools (new-skill, release, trigger-boundary-auditor) had no orchestrator wiring them together |
 
 ## Workflow Conventions
 
-- **Direct-to-main workflow:** Pushes go to `main` without a PR. After Edit/Write, the global rule's `simplify` + `pr-review-toolkit:code-reviewer` reviews still run before commit; only the optional PR-only `code-review:code-review` step is skipped.
+- **Direct-to-main workflow:** Pushes go to `main` without a PR. After Edit/Write, the global rule's `agent-skills:code-simplify` + `agent-skills:review` steps still run before commit; only the optional PR-only `code-review:code-review` step is skipped.
 - **Doc sources of truth:** `package.json` is canonical for version; book inventory is canonical in `skills/_shared/source-coverage.md` (see Gotchas for derivation). README.md, AGENTS.md, GEMINI.md, and CHANGELOG.md must stay in sync — `npm run validate` enforces this.
 - **VS Code extension is OUT OF SCOPE.** Do not plan, propose, or reference VS Code extension features.
 
 ## Critical Gotchas
 
-- **Skill sync after edit:** `skills/` (this repo) and the installed copy (`~/.claude/plugins/cache/.../skills/` or `~/.claude/skills/brooks-lint/`) are independent. For local testing of unsubmitted edits: `cp -r skills/* ~/.claude/skills/brooks-lint/`. To refresh the marketplace install after pushing: `/plugin marketplace update` then `/plugin install brooks-lint@brooks-lint-marketplace`.
+- **Skill sync after edit:** `skills/` (this repo) and the installed copy (`~/.claude/plugins/cache/.../skills/` or `~/.claude/skills/brooks-lint/`) are independent. For local testing of unsubmitted edits: `cp -r skills/* ~/.claude/skills/brooks-lint/` (or symlink once — `ln -s "$PWD/skills" ~/.claude/skills/brooks-lint` — so edits are live with no re-copy; when the symlink is in place, skip the cp). To refresh the marketplace install after pushing: `/plugin marketplace update` then `/plugin install brooks-lint@brooks-lint-marketplace`.
 - **`_shared/` is not a skill:** It holds shared framework files (Iron Law, Report Template, decay-risk definitions). Skills must explicitly read these via the Read tool — they are NOT auto-loaded. Claude Code ignores directories without `SKILL.md`.
 - **SKILL.md Process vs guide steps:** Convention — `SKILL.md` Process provides a high-level skeleton (3–6 items) that cites the guide's step ranges inline, e.g. `Scan decay risks (Steps 1–7 of the guide)`. The guide owns the detailed numbered steps. The two do NOT need to match 1:1 — the skeleton is for orientation, the guide for execution. `npm run validate` enforces guide step continuity (no gaps, no duplicates; sub-steps like `Step 2a`, `Step 6b` are allowed) and SKILL.md Process-section presence. When renaming or renumbering guide steps, update any Step range citations in the SKILL.md Process.
 - **SKILL.md trigger descriptions:** Every `description:` field MUST include a "Do NOT trigger for:" clause. Without it, false triggering occurs (e.g. `brooks-debt` firing on HTTP `/health` questions).
+- **OpenCode slash opt-in:** Every `skills/*/SKILL.md` frontmatter must carry `metadata:` › `opencode/slash: "true"`. OpenCode v2 reads it in `packages/core/src/config/plugin/skill-file.ts` (`metadataBoolean(frontmatter.metadata, "opencode/slash")`) and only then lists the skill in the `/` menu; 1.x ignores the key harmlessly. No other platform reads it, so a seventh skill would ship with a silently missing `/brooks-*` on OpenCode — `checkOpencodeSlashFlag()` in `validate-repo.mjs` is the only thing that catches it. Do **not** ship `commands/opencode/*.md` wrappers instead (PR #34): on v2 a command that shares a skill's name *shadows* the skill — the `/` popup skips skills already registered as commands (`autocomplete.tsx:526`) and submit checks `isCommand` before `isSkill` (`index.tsx:1292`).
 - **Book count is derived, never hardcoded:** `validate-repo.mjs` reads `source-coverage.md` frontmatter and derives `sourceCount` from it. Adding a book = update the frontmatter list + add the corresponding section; the validator auto-adapts.
 - **`package.json` is ESM:** `"type": "module"` enables ESM for everything in `scripts/`. Skills are plain markdown — no bundling.
-- **Slash commands:** Plugin skills register as `/brooks-lint:brooks-review`. Short forms (`/brooks-review`) are auto-installed to `~/.claude/commands/` by the session-start hook — they are thin wrappers, not separate definitions.
+- **Slash commands:** Plugin skills register as `/brooks-lint:brooks-review`. Short forms (`/brooks-review`, `/brooks-audit`, `/brooks-debt`, `/brooks-test`, `/brooks-health`, `/brooks-sweep`) are auto-installed to `~/.claude/commands/` by the session-start hook — they are thin wrappers, not separate definitions. Each wrapper body must **`Read` its skill's `SKILL.md` directly**, NOT "use the Skill tool to invoke …" — a purely self-referential body loops forever when the skill is model-invoked (upstream re-injects the body without the `<command-name>` tag; issue #21 / `anthropics/claude-code#54535`). The hook substitutes `${CLAUDE_PLUGIN_ROOT}` → the absolute plugin path when installing short forms, because that variable does not expand in user commands. `commands/*.md` is shared: the Gemini extension (`gemini-extension.json`) consumes it as-is; Codex loads `skills/` only.
+- **Codex plugin validator — two deliberate failures:** `python3 ~/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py .` (ships with codex-cli) mirrors OpenAI's *workspace ingestion* schema, which is stricter than the Codex CLI loader brooks-lint actually installs through. `interface.defaultPrompt` was a genuine gap and is now fixed; the remaining two failures are intentional and must NOT be "fixed":
+  - `` field `commands` is not accepted `` — `"commands": []` is what stops the CLI from migrating `commands/*.md` into duplicate `source-command-brooks-*` skills (issue #22). Confirmed by installing both ways under an isolated `CODEX_HOME`: drop the field and Codex regenerates `.codex-plugin/migrated-command-skills/`. The CLI's `RawPluginManifest` accepts `commands`; only the ingestion schema rejects it.
+  - `` skill `_shared` is missing `SKILL.md` `` — the validator only skips dot-prefixed dirs, and `_shared/` is a shared-framework dir by design (see above). Renaming it to `.shared/` would also require changing `install.sh`'s `cp -R "$SRC"/*`, whose glob does not match dot-dirs.
 - **GitHub Action cache:** `.github/actions/brooks-lint/action.yml` uses `actions/cache@v4` with built-in cache-hit guard — do NOT add a manual directory check.
+- **Adding a platform is derived, not hardcoded:** create `docs/<name>-setup.md`, add the platform to `install.sh`'s `PLATFORMS` **and** both `global_dir()` / `project_dir()` case tables, then link the new guide from every `README*.md` and `docs/getting-started.md` **and** add the name to each of those documents' `<platform> = …` enumeration (the `<平台> = …` line in the zh translations). That enumeration must list every `PLATFORMS` entry, `claude` included — it is the one spot a platform has to be spelled out, since a bare mention elsewhere is worthless as a check (`~/.bob/skills` in a table row already contains "bob"). `npm run validate` derives all three sides (`scripts/platforms.mjs`) and fails on any gap — a guide missing from one translation, a `PLATFORMS` entry with no directory mapping, or a platform absent from one document's enumeration. Do not add a hand-maintained platform list anywhere.
+- **Star history is data-first, never hand-drawn:** `assets/star-history.json` (raw `starred_at` timestamps, no usernames) is the source of truth; `assets/star-history.svg` is a pure function of it. Never hand-edit the SVG — `npm run validate` re-renders and fails on any mismatch. `node scripts/gen-star-history.mjs` refetches (needs `GITHUB_TOKEN` or `gh auth`, since GitHub restricted the stargazers API to admins/collaborators on 2026-06-30); `--render-only` redraws offline from the committed data. The render must stay deterministic — anchoring the time axis to the clock would make the weekly workflow commit noise on every run.
 - **Custom risks:** Teams add project-specific risk codes via `custom-risks-guide.md` in their project root. Template lives at `skills/_shared/custom-risks-guide.md`.
 
 ## How the Skills Work
 
-1. `hooks/session-start` injects a brief skill list into every session
+1. `hooks/session-start` runs at session open: outputs a skill-list banner to the session context AND installs short-form command wrappers to `~/.claude/commands/`
 2. Triggered skill loads its `SKILL.md` via the Skill tool
 3. `SKILL.md` instructs Claude to read `_shared/common.md` (Iron Law, Config, Report Template)
 4. Claude reads the mode-specific guide + relevant decay-risks file
 5. Findings follow the Iron Law: **Symptom → Source → Consequence → Remedy**
 6. Output uses the standard report template with Health Score (base 100; deductions per finding, floor 0)
 
+## Adding a New Skill
+
+1. `skills/{name}/SKILL.md` — frontmatter with `name`, `description` (must include the "Do NOT trigger for:" clause) and `metadata:` › `opencode/slash: "true"`, plus a `Process` section (3–6 bullets citing guide step ranges)
+2. `skills/{name}/{name}-guide.md` — sequentially numbered steps, no gaps; sub-steps like `Step 2a` allowed
+3. Add ≥1 happy-path eval scenario + ≥1 false-positive scenario (`no_risk_codes: true`) to `evals/evals.json`
+4. `npm run validate` (structure + step continuity) and `npm run evals` (eval schema)
+5. Test locally: `cp -r skills/* ~/.claude/skills/brooks-lint/` → trigger in a Claude session → verify output, then restore the marketplace version per the "Skill sync after edit" gotcha above
+
 ## Eval Suite
 
-`evals/evals.json` contains 49 benchmark scenarios covering R1–R6 (code decay) and T1–T6 (test decay), including false-positive / tradeoff cases that must NOT be flagged. Each scenario has `id`, `name`, `prompt`, `expected_output`, `mode`, `files`. Optional flags (mutually exclusive): `no_risk_codes: true` (no risk codes expected in output) or `no_health_score: true` (Health Score suppression test).
+`evals/evals.json` contains 57 benchmark scenarios covering R1–R6 (code decay) and T1–T6 (test decay), including false-positive / tradeoff cases that must NOT be flagged. Each scenario has `id`, `name`, `prompt`, `expected_output`, `mode`, `files`. Optional flags (mutually exclusive): `no_risk_codes: true` (no risk codes expected in output) or `no_health_score: true` (Health Score suppression test).
 
 To add a scenario: append to the `evals` array with the next sequential `id` and the relevant risk code. Validate structure with `npm run evals`; live-test with `npm run evals:live` (requires `ANTHROPIC_API_KEY`).
+
+`expected_output` should describe the Iron Law finding (Symptom + risk code) and a Health Score range; it does NOT need to be verbatim — the evaluator matches semantics. For false-positive / tradeoff scenarios, set `no_risk_codes: true` and describe what must NOT appear in output.
+
+## Parser-Fidelity Benchmark
+
+`evals/benchmark-corpus.json` is a FROZEN corpus of 30 real, model-generated reports (one per curated sample, across all six modes) each paired with an independently-graded finding inventory. `scripts/benchmark.mjs` (`npm run benchmark`) runs the shipped parser (`report-parse.mjs` / `sarif.mjs`) against it and reports severity-count fidelity, risk-code precision/recall, and SARIF validity; `npm test` guards the same as a deterministic regression. This is distinct from the eval suite: it benchmarks the **parser/SARIF plumbing**, not model judgment. The corpus is a frozen artifact — regenerate it only by re-running the generation workflow and hand-checking the new ground truth; do NOT hand-edit `report` or `truth` to make a failing parser pass.
 
 ## Development Commands
 
 ```bash
-npm run validate          # Repo consistency: manifests, README badge, changelog, source inventory, skills structure
+npm run bump              # Propagate the package.json version to all manifests + every version-bearing text file (NOT changelog)
+npm run validate          # Repo consistency: manifests, version refs, changelog, source inventory, skills structure
+npm run changelog:audit   # Release-time: account for every commit since the last tag (see Release Process)
 npm test                  # Unit tests for validate-repo helpers
 npm run evals             # Eval structural validation (IDs, fields, risk-code refs)
 npm run evals:live        # Live evals against the AI (requires ANTHROPIC_API_KEY)
+npm run benchmark         # Parser-fidelity benchmark on the frozen real-report corpus
 npm run history           # View Health Score trend (.brooks-lint-history.json)
 
 # Test hooks locally
@@ -55,4 +89,25 @@ CLAUDE_PLUGIN_ROOT=1 bash hooks/session-start   # plugin platform branch
 
 ## Release Process
 
-Bump `package.json` version → add `## [X.Y.Z] - YYYY-MM-DD` to `CHANGELOG.md` → `npm run validate` (catches drift across manifests, README badge, changelog) → commit, push, tag GitHub release.
+Set the new version in `package.json` (e.g. `npm version <v> --no-git-tag-version`), then `npm run bump` (propagates the version to all manifests plus every version-bearing text file listed by `scripts/version-refs.mjs` — all six README badges and the docs landing-page JSON-LD) → add the new `CHANGELOG.md` section by hand → **audit the commit range** (below) → `npm run validate` → commit, push, tag GitHub release.
+
+**Check the version number against the backlog first.** The bump is decided by what is *unreleased*, not by the size of the change in front of you. `npm run changelog:audit` prints the range before you choose the number — a "small doc fix" on top of an unreleased new platform is a minor, not a patch. v1.5.1 was cut, then deleted and re-cut as v1.6.0 for exactly this reason.
+
+**Audit the commit range against the changelog — every commit, no sampling.** `npm run changelog:audit` (`scripts/changelog-audit.mjs`) derives the range from the last release tag (`v[0-9]*`) and prints it as a checklist to walk, with three exemptions applied for you: the release bump itself, a merge commit (its branch commits are listed separately), and the weekly star-history refresh — a `[bot]` author's commit touching only the files `gen-star-history.mjs` exports as `STAR_HISTORY_FILES`. That last one is judged by what the commit *changed*, not by its subject: `[bot]` plus `chore:` was wide enough to exempt a `dependabot[bot]` `chore(deps): bump …`, and a dependency bump is a change this changelog records. **Nothing else is exempt** — internal hardening with no user-visible behavior change (a new validator check, a test-only guard) earns an entry, and so does a maintainer-facing doc fix from an outside contributor, who gets credited by `@handle` like any other.
+
+Between releases the command reports the same range as the *next* release's backlog and exits 0; it only enforces while a release is in progress, because nobody edits a section that already shipped.
+
+The script fails on the one gap it can *prove*: a pull request merged in the range whose `#N` the section never cites. `checkChangelogCoverage()` runs that same check inside `npm run validate`, but **only while a release is in progress** — derived as "`package.json`'s version has no `v<version>` tag yet", so it is a no-op during normal work and unskippable at the one moment it matters. It needs tags, which is why `validate.yml` checks out with `fetch-depth: 0`. Whenever it stands down it says so on stdout (`Changelog coverage: not audited — …`); a gate whose off-state looks like a pass is the silence this check exists to remove. Everything else on the checklist is judgment and stays yours.
+
+**Do not read a green audit as proof the changelog is complete.** Three things it cannot see, by construction:
+- **A bare number anywhere clears the gate.** Citation is matched as `#N` or a `/pull/N` link *anywhere in the section* — including a mention in passing, which is the exact 1.6.0 trap ("it reads as prior state when a later entry mentions it"). The check proves the number was written, not that an entry was written.
+- **A rebase-merged PR is invisible.** It leaves neither a `(#N)` subject nor a merge commit, so it is an ordinary checklist line with nothing enforced behind it.
+- **Whatever rides along in the release bump is never audited.** Step 5 stages everything `npm run bump` rewrote, and step 4 says "fix and re-run until clean" — so a fix made during validation lands inside the exempt commit and no release ever sees it. Land such fixes as their own commit before bumping.
+
+**A commit that defers its changelog entry says so in a `Changelog:` trailer**, so the audit can surface it in the checklist:
+
+```
+Changelog: added — platform docs and installer mappings are cross-checked
+```
+
+Use it when a change lands without a version bump. A trailer rather than a sentence in the body, because prose cannot tell a commit deferring its own entry from one quoting another commit that did. This is what 1.6.0 got wrong twice: `d4b5c40` asked in plain prose to be logged in the next release and was missed anyway, and PR #25 went uncredited in a release that credited two other contributors. Both were found only by auditing after publishing.
