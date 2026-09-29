@@ -90,6 +90,14 @@ export function readStamps() {
   return JSON.parse(readFileSync(DATA, "utf8")).starredAt;
 }
 
+// The committed dataset names the repository the chart was drawn for, and it
+// outranks GITHUB_REPOSITORY: a fork's CI renders a different subtitle from the
+// environment than the committed SVG carries, so `npm run validate` could never
+// pass there. Falls back to the environment only for a pre-repo dataset.
+function committedRepo() {
+  return JSON.parse(readFileSync(DATA, "utf8")).repo ?? REPO;
+}
+
 function writeStamps(stamps) {
   // Deliberately no generated-at field: the file has to stay byte-identical when
   // no star was added, or the workflow's "commit only when it moved" guard would
@@ -138,7 +146,7 @@ function downsample(points, limit) {
   return kept;
 }
 
-export function render(stamps) {
+export function render(stamps, repo = committedRepo()) {
   const times = stamps.map((iso) => Date.parse(iso));
   const total = times.length;
   const t0 = times[0];
@@ -187,7 +195,7 @@ export function render(stamps) {
   const lastX = PAD.left + PLOT_W;
   const lastY = y(total);
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Star history for ${esc(REPO)}: ${total} stars">
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Star history for ${esc(repo)}: ${total} stars">
   <style>
     .bg { fill: #ffffff; }
     .title { fill: #111827; font: 600 16px ${FONT}; }
@@ -212,7 +220,7 @@ export function render(stamps) {
   </defs>
   <rect width="${W}" height="${H}" class="bg"/>
   <text x="${PAD.left}" y="26" class="title">Star History</text>
-  <text x="${W - PAD.right}" y="26" class="sub" text-anchor="end">${esc(REPO)}</text>
+  <text x="${W - PAD.right}" y="26" class="sub" text-anchor="end">${esc(repo)}</text>
   <g>
     ${gridLines}
   </g>
