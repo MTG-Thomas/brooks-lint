@@ -14,15 +14,19 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "./cli-utils.mjs";
+import { assertFindingCounts, validateGateReport } from "./ci-report.mjs";
 
 /**
  * True when findings at/above the `failOn` severity exist.
- * @param {{critical?: number, warning?: number, suggestion?: number}} findings
+ * @param {{critical: number, warning: number, suggestion: number}} findings
  * @param {"none"|"warning"|"critical"} failOn
  */
 export function severityBreached(findings, failOn) {
-  const critical = findings?.critical ?? 0;
-  const warning = findings?.warning ?? 0;
+  assertFindingCounts(findings);
+  if (!["none", "warning", "critical"].includes(failOn)) {
+    throw new Error(`Unknown fail-on severity: ${failOn}`);
+  }
+  const { critical, warning } = findings;
   if (failOn === "critical") return critical > 0;
   if (failOn === "warning") return critical + warning > 0;
   return false;
@@ -35,13 +39,22 @@ export function isRegression(delta) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const args = parseArgs(process.argv.slice(2));
-  const report = JSON.parse(readFileSync(args.report, "utf8"));
   const failOn = args["fail-on"] ?? "none";
   // parseArgs yields boolean true for a bare flag and a string otherwise.
   const failOnRegression = String(args["fail-on-regression"]).toLowerCase() === "true";
 
+  let report, breached;
+  try {
+    report = JSON.parse(readFileSync(args.report, "utf8"));
+    validateGateReport(report);
+    breached = severityBreached(report.findings, failOn);
+  } catch (err) {
+    console.error(`Review validation failed: ${err.message}`);
+    process.exit(1);
+  }
+
   let failed = false;
-  if (failOn !== "none" && severityBreached(report.findings, failOn)) {
+  if (breached) {
     console.error(`Severity gate failed (fail-on=${failOn}): ${JSON.stringify(report.findings)}`);
     failed = true;
   }

@@ -31,7 +31,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { assembleSystemPrompt, VALID_MODES } from "./assemble-prompt.mjs";
 import { readHistory, getTrend } from "./history.mjs";
-import { countFindings } from "./report-parse.mjs";
+import { CI_REPORT_INSTRUCTIONS, validateReviewReport } from "./ci-report.mjs";
 import { reportToSarif } from "./sarif.mjs";
 import { parseArgs } from "./cli-utils.mjs";
 import {
@@ -115,7 +115,7 @@ function getGitDiff(projectRoot) {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 const { diff, scope } = getGitDiff(projectDir);
-const systemPrompt = assembleSystemPrompt(mode, skillsDir, projectDir);
+const systemPrompt = `${assembleSystemPrompt(mode, skillsDir, projectDir)}\n${CI_REPORT_INSTRUCTIONS}`;
 
 const userMessage = diff
   ? `Run brooks-lint ${mode} mode on the following diff.\n\nScope: ${scope}\n\n\`\`\`diff\n${diff}\n\`\`\``
@@ -138,6 +138,11 @@ if (provider === "opencode") {
       session: `brooks-lint-${mode}-${process.env.GITHUB_RUN_ID ?? "local"}`,
       userAgent: `brooks-lint/${toolVersion}`,
     });
+    const completion = protocol === "responses" ? payload.status : payload.choices?.[0]?.finish_reason;
+    const expected = protocol === "responses" ? "completed" : "stop";
+    if (completion != null && completion !== expected) {
+      throw new Error(`Review did not complete (${completion}); no CI result was produced`);
+    }
     report = extractCompletionText(protocol, payload);
   } catch (err) {
     console.error(JSON.stringify({ error: err.message, mode, scope }, null, 2));
@@ -155,6 +160,9 @@ if (provider === "opencode") {
       system: systemPrompt,
       messages: [{ role: "user", content: userMessage }],
     });
+    if (message.stop_reason !== "end_turn") {
+      throw new Error(`Review did not complete (${message.stop_reason}); no CI result was produced`);
+    }
   } catch (err) {
     console.error(JSON.stringify({ error: err.message, mode, scope }, null, 2));
     process.exit(1);
@@ -164,10 +172,13 @@ if (provider === "opencode") {
   report = message.content.find((block) => block.type === "text")?.text ?? "";
 }
 
-const scoreMatch = report.match(/Health\s+Score[:\s]+(\d+)/i);
-const score = scoreMatch ? parseInt(scoreMatch[1], 10) : null;
-
-const findings = countFindings(report);
+let score, findings;
+try {
+  ({ score, findings } = validateReviewReport(report));
+} catch (err) {
+  console.error(JSON.stringify({ error: err.message, mode, scope }, null, 2));
+  process.exit(1);
+}
 
 const trend = getTrend(readHistory(projectDir), mode);
 const previousScore = trend ? trend.lastScore : null;

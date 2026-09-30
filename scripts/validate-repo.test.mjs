@@ -922,9 +922,9 @@ test("fail-on none never trips", () => {
   assert.equal(severityBreached({ critical: 9, warning: 9, suggestion: 9 }, "none"), false);
 });
 
-test("missing or partial findings are treated as zero", () => {
-  assert.equal(severityBreached(undefined, "critical"), false);
-  assert.equal(severityBreached({}, "warning"), false);
+test("missing or partial findings are rejected instead of treated as zero", () => {
+  assert.throws(() => severityBreached(undefined, "critical"), /Invalid review report/);
+  assert.throws(() => severityBreached({}, "warning"), /Invalid review report/);
 });
 
 console.log("\nisRegression");
