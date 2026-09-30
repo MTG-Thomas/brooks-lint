@@ -438,6 +438,20 @@ See [`docs/github-action-example.yml`](docs/github-action-example.yml) for the f
 
 The action posts the review as a PR comment and optionally fails the check if the Health Score drops below a threshold. If `.brooks-lint-history.json` is committed to your repo, the comment also includes a trend delta (e.g., "85 → 82 (−3) over last 3 runs").
 
+**Invalid reviews fail closed.** Before producing JSON, SARIF, or a PR comment,
+the CI runner requires a complete, parseable report: one numeric Health Score,
+a `## Findings` section containing complete Iron Law findings or an explicit
+`No findings.`, a nonempty `## Summary`, and a final `Review status: complete`
+line. The runner adds this format contract to the model prompt in every CI mode;
+interactive skill reports keep their existing formats. Empty responses,
+unrecognized finding blocks, missing fields, and known truncated/refused
+completions fail the run even when `fail-below` is `0` and `fail-on` is `none`.
+The standalone gate also revalidates report text against the serialized score
+and counts, so missing or malformed input cannot become zero findings. If a
+provider ignores the format contract, rerun or investigate that provider's
+output rather than accepting the failure as a clean review. Format validation
+does not prove the model found every real defect.
+
 **Quality gates and Code Scanning.** Beyond `fail-below`, the action exposes:
 
 ```yaml
